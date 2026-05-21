@@ -81,6 +81,7 @@ assign FIFO_PKTEND = 1'b0;
 // We completely remove the timeout logic because USB gaps break it.
 // Instead, we strictly count exactly 24 valid bytes.
 reg [191:0] FIFO_value;
+reg [191:0] FIFO_payload;
 reg [4:0] byte_count;
 reg packet_ready;
 
@@ -90,6 +91,7 @@ always @(posedge FIFO_CLK) begin
 		FIFO_value <= {FIFO_DATAIN, FIFO_value[191:8]};
 		if (byte_count == 5'd23) begin
 			packet_ready <= 1'b1;
+			FIFO_payload <= {FIFO_DATAIN, FIFO_value[191:8]};
 			byte_count <= 5'd0;
 		end else begin
 			byte_count <= byte_count + 5'd1;
@@ -127,12 +129,12 @@ reg [31:0] DDS2_amp;
 
 always @(posedge clk_151MHz) begin
 	if(new_acc_inc) begin
-		DDS1_acc_inc <= FIFO_value[31:0];
-		DDS1_phase   <= FIFO_value[63:32];
-		DDS1_amp     <= FIFO_value[95:64];
-		DDS2_acc_inc <= FIFO_value[127:96];
-		DDS2_phase   <= FIFO_value[159:128];
-		DDS2_amp     <= FIFO_value[191:160];
+		DDS1_acc_inc <= FIFO_payload[31:0];
+		DDS1_phase   <= FIFO_payload[63:32];
+		DDS1_amp     <= FIFO_payload[95:64];
+		DDS2_acc_inc <= FIFO_payload[127:96];
+		DDS2_phase   <= FIFO_payload[159:128];
+		DDS2_amp     <= FIFO_payload[191:160];
 	end
 end
 
@@ -195,14 +197,29 @@ reg [linearinterpolation_width-1:0] acc_delayC;  always @(posedge clk) acc_delay
 
 wire [linearinterpolation_width  :0] sine1_mf = (1 << linearinterpolation_width) - acc_delayC;
 wire [linearinterpolation_width-1:0] sine2_mf = acc_delayC;
-reg [P-1:0] sine_p; always @(posedge clk) sine_p <= sine1_lv*sine1_mf + sine2_lv*sine2_mf;
 
-wire signed [P-1:0] sine_ac = {~sine_p[P-1], sine_p[P-2:0]};
-wire signed [16:0] amp_signed = {1'b0, amplitude};
-reg signed [P+16:0] sine_ac_amp;
-always @(posedge clk) sine_ac_amp <= sine_ac * amp_signed;
+// Pipeline the heavy DSP multiplier and adder to eliminate setup timing violations
+reg [P-1:0] sine_p1, sine_p2;
+always @(posedge clk) begin
+	sine_p1 <= sine1_lv * sine1_mf;
+	sine_p2 <= sine2_lv * sine2_mf;
+end
+reg [P-1:0] sine_p; always @(posedge clk) sine_p <= sine_p1 + sine_p2;
 
-always @(posedge clk) value <= {~sine_ac_amp[P+16], sine_ac_amp[P+14 : P+16-DAC_width]};
+// Bypass the AMERGE bug in Quartus by using unsigned multiplication
+reg [P+15:0] sine_p_amp;
+reg [15:0] amp_delay;
+always @(posedge clk) begin
+	sine_p_amp <= sine_p * amplitude;
+	amp_delay <= amplitude;
+end
+
+// Center offset is amp_delay * 1<<(P-1).
+wire [P+16:0] offset = amp_delay;
+reg [P+16:0] sine_ac_amp;
+always @(posedge clk) sine_ac_amp <= {1'b0, sine_p_amp} - (offset << (P-1));
+
+always @(posedge clk) value <= {~sine_ac_amp[P+14], sine_ac_amp[P+13 : P+15-DAC_width]};
 endmodule
 
 /////////////////////////////////////////////////////
