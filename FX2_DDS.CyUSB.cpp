@@ -14,6 +14,8 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
+#include <cmath>
 //#include <stdlib.h>
 
 #include "CyAPI.h"
@@ -43,6 +45,13 @@ static GUID GUID_Cypress = {0xAE18AA60, 0x7F6A, 0x11d4, 0x97, 0xDD, 0x00, 0x01, 
 #define BulkInPipe4  USBDevice->EndPoints[5]
 #define BulkInPipe5  USBDevice->EndPoints[6]
 
+void pack32(unsigned char* buf, unsigned int val) {
+	buf[0] = val & 0xFF;
+	buf[1] = (val >> 8) & 0xFF;
+	buf[2] = (val >> 16) & 0xFF;
+	buf[3] = (val >> 24) & 0xFF;
+}
+
 ///////////////////////////////////////////////////
 // Specify the sine output frequency in Hertz in the first argument
 // and the DDS sine output will be set
@@ -51,13 +60,27 @@ int main(int argc,char *argv[])
 {
 	double freq1 = 1250;				// By default, we want a 1250 Hz sine wave on DDS 1
 	double freq2 = 2500;				// and a 2500 Hz sine wave on DDS 2
+	double phase1 = 0, phase2 = 0;		// Phase offset in degrees
+	double amp1 = 100, amp2 = 100;		// Amplitude in percentage
 	
-	if (argc <= 1) {
-		printf("Usage: DDSConsole.exe [freq1_Hz] [freq2_Hz]\n");
-		printf("No frequencies specified - using defaults.\n\n");
-	} else {
-		if(atof(argv[1]) != 0.0) freq1 = atof(argv[1]);
-		if(argc > 2 && atof(argv[2]) != 0.0) freq2 = atof(argv[2]);
+	if (argc <= 1) printf("Usage: DDSConsole.exe freq=1000 phase1=90 amp2=50\nUsing defaults.\n\n");
+
+	for (int i = 1; i < argc; i++) {
+		char* arg = argv[i];
+		if (strncmp(arg, "freq1=", 6) == 0) freq1 = atof(arg + 6);
+		else if (strncmp(arg, "freq2=", 6) == 0) freq2 = atof(arg + 6);
+		else if (strncmp(arg, "freq=", 5) == 0) freq1 = freq2 = atof(arg + 5);
+		else if (strncmp(arg, "phase1=", 7) == 0) phase1 = atof(arg + 7);
+		else if (strncmp(arg, "phase2=", 7) == 0) phase2 = atof(arg + 7);
+		else if (strncmp(arg, "phase=", 6) == 0) phase1 = phase2 = atof(arg + 6);
+		else if (strncmp(arg, "amp1=", 5) == 0) amp1 = atof(arg + 5);
+		else if (strncmp(arg, "amp2=", 5) == 0) amp2 = atof(arg + 5);
+		else if (strncmp(arg, "amp=", 4) == 0) amp1 = amp2 = atof(arg + 4);
+		else {
+			// Fallback for purely positional arguments
+			if (i == 1 && atof(arg) != 0.0) freq1 = atof(arg);
+			if (i == 2 && atof(arg) != 0.0) freq2 = atof(arg);
+		}
 	}
 
 	int oscillator = 75757500;			// Our DDS is clocked by a 75.7575MHz oscilator
@@ -65,24 +88,30 @@ int main(int argc,char *argv[])
 
 	unsigned int DDS1_acc_inc = (unsigned int)(freq1 / oscillator * DDS_acc_range);
 	unsigned int DDS2_acc_inc = (unsigned int)(freq2 / oscillator * DDS_acc_range);
+	
+	unsigned int DDS1_phase_off = (unsigned int)(fmod(phase1, 360.0) / 360.0 * DDS_acc_range);
+	unsigned int DDS2_phase_off = (unsigned int)(fmod(phase2, 360.0) / 360.0 * DDS_acc_range);
 
-	unsigned char payload[8];
-	payload[0] = DDS1_acc_inc & 0xFF;
-	payload[1] = (DDS1_acc_inc >> 8) & 0xFF;
-	payload[2] = (DDS1_acc_inc >> 16) & 0xFF;
-	payload[3] = (DDS1_acc_inc >> 24) & 0xFF;
-	payload[4] = DDS2_acc_inc & 0xFF;
-	payload[5] = (DDS2_acc_inc >> 8) & 0xFF;
-	payload[6] = (DDS2_acc_inc >> 16) & 0xFF;
-	payload[7] = (DDS2_acc_inc >> 24) & 0xFF;
+	if (amp1 < 0.0) amp1 = 0; if (amp1 > 100.0) amp1 = 100.0;
+	if (amp2 < 0.0) amp2 = 0; if (amp2 > 100.0) amp2 = 100.0;
+	unsigned int DDS1_amp_val = (unsigned int)((amp1 / 100.0) * 65535.0);
+	unsigned int DDS2_amp_val = (unsigned int)((amp2 / 100.0) * 65535.0);
+
+	unsigned char payload[24];
+	pack32(&payload[0], DDS1_acc_inc);
+	pack32(&payload[4], DDS1_phase_off);
+	pack32(&payload[8], DDS1_amp_val);
+	pack32(&payload[12], DDS2_acc_inc);
+	pack32(&payload[16], DDS2_phase_off);
+	pack32(&payload[20], DDS2_amp_val);
 
 	CCyUSBDevice *USBDevice = new CCyUSBDevice(NULL, GUID_Cypress);
 	if (USBDevice->DeviceCount() > 0 && BulkOutPipe2 != NULL) {
-		LONG len = 8;
+		LONG len = 24;
 		BulkOutPipe2->XferData(payload, len); // FPGA securely receives both channels
 		
-		printf("DDS 1 frequency set at %.1f Hz\n", freq1);
-		printf("DDS 2 frequency set at %.1f Hz\n", freq2);
+		printf("DDS 1: freq=%.1f Hz, phase=%.1f deg, amp=%.1f %%\n", freq1, phase1, amp1);
+		printf("DDS 2: freq=%.1f Hz, phase=%.1f deg, amp=%.1f %%\n", freq2, phase2, amp2);
 	} else {
 		printf("Error: USB Device not connected or missing endpoint!\n");
 	}

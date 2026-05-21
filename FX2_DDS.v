@@ -79,17 +79,21 @@ assign FIFO_DATAOUT_OE = 1'b0;			// never output data
 assign FIFO_PKTEND = 1'b0;
 
 // We completely remove the timeout logic because USB gaps break it.
-// Instead, we strictly count exactly 8 valid bytes.
-reg [63:0] FIFO_value;
-reg [2:0] byte_count;
+// Instead, we strictly count exactly 24 valid bytes.
+reg [191:0] FIFO_value;
+reg [4:0] byte_count;
 reg packet_ready;
 
 always @(posedge FIFO_CLK) begin
 	packet_ready <= 1'b0;
 	if (FIFO2_data_available) begin
-		FIFO_value <= {FIFO_DATAIN, FIFO_value[63:8]};
-		byte_count <= byte_count + 3'd1;
-		if (byte_count == 3'd7) packet_ready <= 1'b1;
+		FIFO_value <= {FIFO_DATAIN, FIFO_value[191:8]};
+		if (byte_count == 5'd23) begin
+			packet_ready <= 1'b1;
+			byte_count <= 5'd0;
+		end else begin
+			byte_count <= byte_count + 5'd1;
+		end
 	end
 end
 
@@ -98,12 +102,20 @@ wire new_acc_inc;
 Flag_CrossDomain fcdnai(.clkA(FIFO_CLK), .FlagIn_clkA(packet_ready), .clkB(DAC_clk_in), .FlagOut_clkB(new_acc_inc));
 
 reg [31:0] DDS1_acc_inc;
+reg [31:0] DDS1_phase;
+reg [31:0] DDS1_amp;
 reg [31:0] DDS2_acc_inc;
+reg [31:0] DDS2_phase;
+reg [31:0] DDS2_amp;
 
 always @(posedge DAC_clk_in) begin
 	if(new_acc_inc) begin
 		DDS1_acc_inc <= FIFO_value[31:0];
-		DDS2_acc_inc <= FIFO_value[63:32];
+		DDS1_phase   <= FIFO_value[63:32];
+		DDS1_amp     <= FIFO_value[95:64];
+		DDS2_acc_inc <= FIFO_value[127:96];
+		DDS2_phase   <= FIFO_value[159:128];
+		DDS2_amp     <= FIFO_value[191:160];
 	end
 end
 
@@ -111,8 +123,8 @@ assign LED = 1'b1; // Tie LED off (inactive high)
 
 // DDS
 assign DAC_clk_out = ~DAC_clk_in;
-DDS_sine_lookup_linearinterpolated dds_core1(.clk(DAC_clk_in), .acc_inc(DDS1_acc_inc), .value(DAC_data_out_1));
-DDS_sine_lookup_linearinterpolated dds_core2(.clk(DAC_clk_in), .acc_inc(DDS2_acc_inc), .value(DAC_data_out_2));
+DDS_sine_lookup_linearinterpolated dds_core1(.clk(DAC_clk_in), .acc_inc(DDS1_acc_inc), .phase_offset(DDS1_phase), .amplitude(DDS1_amp[15:0]), .value(DAC_data_out_1));
+DDS_sine_lookup_linearinterpolated dds_core2(.clk(DAC_clk_in), .acc_inc(DDS2_acc_inc), .phase_offset(DDS2_phase), .amplitude(DDS2_amp[15:0]), .value(DAC_data_out_2));
 
 endmodule
 
@@ -138,30 +150,41 @@ assign FlagOut_clkB = (SyncA_clkB[2] ^ SyncA_clkB[1]);  // recreate the flag fro
 endmodule
 
 /////////////////////////////////////////////////////
-module DDS_sine_lookup_linearinterpolated(clk, acc_inc, value);
+module DDS_sine_lookup_linearinterpolated(clk, acc_inc, phase_offset, amplitude, value);
 parameter acc_width = 32;
 parameter lookup_addr_width = 11;
 parameter lookup_value_width = 17;
 parameter linearinterpolation_width = 8;
 parameter DAC_width = 10;
+localparam P = lookup_value_width + linearinterpolation_width;
 
 input clk;
 input [acc_width-1:0] acc_inc;
+input [acc_width-1:0] phase_offset;
+input [15:0] amplitude;
 output [DAC_width-1:0] value;
 
 reg [acc_width-1:0] acc;
 always @(posedge clk) acc <= acc + acc_inc;
-wire [lookup_value_width-1:0] sine1_lv;  sine_lookup sine1(.clk(clk), .addr(acc[acc_width-1:acc_width-lookup_addr_width]  ), .value(sine1_lv));
-wire [lookup_value_width-1:0] sine2_lv;  sine_lookup sine2(.clk(clk), .addr(acc[acc_width-1:acc_width-lookup_addr_width]+11'd1), .value(sine2_lv));
 
-reg [linearinterpolation_width-1:0] acc_delayA;  always @(posedge clk) acc_delayA <= acc[acc_width-lookup_addr_width-1:acc_width-lookup_addr_width-linearinterpolation_width];
+wire [acc_width-1:0] acc_shifted = acc + phase_offset;
+wire [lookup_value_width-1:0] sine1_lv;  sine_lookup sine1(.clk(clk), .addr(acc_shifted[acc_width-1:acc_width-lookup_addr_width]  ), .value(sine1_lv));
+wire [lookup_value_width-1:0] sine2_lv;  sine_lookup sine2(.clk(clk), .addr(acc_shifted[acc_width-1:acc_width-lookup_addr_width]+11'd1), .value(sine2_lv));
+
+reg [linearinterpolation_width-1:0] acc_delayA;  always @(posedge clk) acc_delayA <= acc_shifted[acc_width-lookup_addr_width-1:acc_width-lookup_addr_width-linearinterpolation_width];
 reg [linearinterpolation_width-1:0] acc_delayB;  always @(posedge clk) acc_delayB <= acc_delayA;
 reg [linearinterpolation_width-1:0] acc_delayC;  always @(posedge clk) acc_delayC <= acc_delayB;
 
 wire [linearinterpolation_width  :0] sine1_mf = (1 << linearinterpolation_width) - acc_delayC;
 wire [linearinterpolation_width-1:0] sine2_mf = acc_delayC;
-reg [lookup_value_width+linearinterpolation_width-1:0] sine_p; always @(posedge clk) sine_p <= sine1_lv*sine1_mf + sine2_lv*sine2_mf;
-assign value = sine_p[lookup_value_width+linearinterpolation_width-1:lookup_value_width+linearinterpolation_width-DAC_width];
+reg [P-1:0] sine_p; always @(posedge clk) sine_p <= sine1_lv*sine1_mf + sine2_lv*sine2_mf;
+
+wire signed [P-1:0] sine_ac = {~sine_p[P-1], sine_p[P-2:0]};
+wire signed [16:0] amp_signed = {1'b0, amplitude};
+reg signed [P+16:0] sine_ac_amp;
+always @(posedge clk) sine_ac_amp <= sine_ac * amp_signed;
+
+assign value = {~sine_ac_amp[P+16], sine_ac_amp[P+15 : P+17-DAC_width]};
 endmodule
 
 /////////////////////////////////////////////////////
