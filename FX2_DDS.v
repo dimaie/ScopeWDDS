@@ -97,9 +97,26 @@ always @(posedge FIFO_CLK) begin
 	end
 end
 
+wire [5:0] pll_clks;
+wire clk_151MHz = pll_clks[0];
+
+altpll altpll_component (
+	.inclk ({1'b0, DAC_clk_in}),
+	.clk (pll_clks)
+);
+defparam
+	altpll_component.operation_mode = "NORMAL",
+	altpll_component.inclk0_input_frequency = 13200, // Period in ps for 75.7575 MHz
+	altpll_component.clk0_multiply_by = 2,
+	altpll_component.clk0_divide_by = 1,
+	altpll_component.clk1_multiply_by = 2,
+	altpll_component.clk1_divide_by = 1,
+	altpll_component.clk1_phase_shift = "3300",      // 180 degrees at 151.515 MHz
+	altpll_component.lpm_type = "altpll";
+
 // cross clock domain to DDS
 wire new_acc_inc;
-Flag_CrossDomain fcdnai(.clkA(FIFO_CLK), .FlagIn_clkA(packet_ready), .clkB(DAC_clk_in), .FlagOut_clkB(new_acc_inc));
+Flag_CrossDomain fcdnai(.clkA(FIFO_CLK), .FlagIn_clkA(packet_ready), .clkB(clk_151MHz), .FlagOut_clkB(new_acc_inc));
 
 reg [31:0] DDS1_acc_inc;
 reg [31:0] DDS1_phase;
@@ -108,7 +125,7 @@ reg [31:0] DDS2_acc_inc;
 reg [31:0] DDS2_phase;
 reg [31:0] DDS2_amp;
 
-always @(posedge DAC_clk_in) begin
+always @(posedge clk_151MHz) begin
 	if(new_acc_inc) begin
 		DDS1_acc_inc <= FIFO_value[31:0];
 		DDS1_phase   <= FIFO_value[63:32];
@@ -122,9 +139,9 @@ end
 assign LED = 1'b1; // Tie LED off (inactive high)
 
 // DDS
-assign DAC_clk_out = ~DAC_clk_in;
-DDS_sine_lookup_linearinterpolated dds_core1(.clk(DAC_clk_in), .acc_inc(DDS1_acc_inc), .phase_offset(DDS1_phase), .amplitude(DDS1_amp[15:0]), .value(DAC_data_out_1));
-DDS_sine_lookup_linearinterpolated dds_core2(.clk(DAC_clk_in), .acc_inc(DDS2_acc_inc), .phase_offset(DDS2_phase), .amplitude(DDS2_amp[15:0]), .value(DAC_data_out_2));
+assign DAC_clk_out = pll_clks[1];
+DDS_sine_lookup_linearinterpolated dds_core1(.clk(clk_151MHz), .acc_inc(DDS1_acc_inc), .phase_offset(DDS1_phase), .amplitude(DDS1_amp[15:0]), .value(DAC_data_out_1));
+DDS_sine_lookup_linearinterpolated dds_core2(.clk(clk_151MHz), .acc_inc(DDS2_acc_inc), .phase_offset(DDS2_phase), .amplitude(DDS2_amp[15:0]), .value(DAC_data_out_2));
 
 endmodule
 
@@ -162,12 +179,13 @@ input clk;
 input [acc_width-1:0] acc_inc;
 input [acc_width-1:0] phase_offset;
 input [15:0] amplitude;
-output [DAC_width-1:0] value;
+output reg [DAC_width-1:0] value;
 
 reg [acc_width-1:0] acc;
 always @(posedge clk) acc <= acc + acc_inc;
 
-wire [acc_width-1:0] acc_shifted = acc + phase_offset;
+reg [acc_width-1:0] acc_shifted;
+always @(posedge clk) acc_shifted <= acc + phase_offset;
 wire [lookup_value_width-1:0] sine1_lv;  sine_lookup sine1(.clk(clk), .addr(acc_shifted[acc_width-1:acc_width-lookup_addr_width]  ), .value(sine1_lv));
 wire [lookup_value_width-1:0] sine2_lv;  sine_lookup sine2(.clk(clk), .addr(acc_shifted[acc_width-1:acc_width-lookup_addr_width]+11'd1), .value(sine2_lv));
 
@@ -184,7 +202,7 @@ wire signed [16:0] amp_signed = {1'b0, amplitude};
 reg signed [P+16:0] sine_ac_amp;
 always @(posedge clk) sine_ac_amp <= sine_ac * amp_signed;
 
-assign value = {~sine_ac_amp[P+16], sine_ac_amp[P+15 : P+17-DAC_width]};
+always @(posedge clk) value <= {~sine_ac_amp[P+16], sine_ac_amp[P+14 : P+16-DAC_width]};
 endmodule
 
 /////////////////////////////////////////////////////
@@ -206,5 +224,5 @@ defparam ROM_sine.lpm_file = "sine.mif";
 defparam ROM_sine.lpm_outdata = "REGISTERED";
 
 reg [1:0] addr_MSBdelay; always @(posedge clk) addr_MSBdelay <= {addr_MSBdelay[0],addr[10]};
-reg [16:0] value; always @(posedge clk) value <= addr_MSBdelay[1] ? {1'b0,-ROM_sine_q} : {1'b1,ROM_sine_q};
+reg [16:0] value; always @(posedge clk) value <= addr_MSBdelay[1] ? 17'h0FFFF - ROM_sine_q : 17'h10000 + ROM_sine_q;
 endmodule

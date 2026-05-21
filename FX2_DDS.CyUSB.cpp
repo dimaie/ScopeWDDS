@@ -16,7 +16,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <cmath>
-//#include <stdlib.h>
+#include <stdlib.h>
 
 #include "CyAPI.h"
 #pragma comment(lib, "CyAPI.lib")       // this links CyAPI.lib statically to the project
@@ -55,6 +55,15 @@ void pack32(unsigned char* buf, unsigned int val) {
 ///////////////////////////////////////////////////
 // Specify the sine output frequency in Hertz in the first argument
 // and the DDS sine output will be set
+template <typename T>
+int extract_arg(const char* arg, const char* prefix, T* out_val, T (*converter)(const char*)) {
+	int prefix_len = strlen(prefix);
+	if (strncmp(arg, prefix, prefix_len) == 0 && arg[prefix_len] == '=') {
+		*out_val = converter(arg + prefix_len + 1);
+		return 1;
+	}
+	return 0;
+}
 
 int main(int argc,char *argv[])
 {
@@ -67,24 +76,34 @@ int main(int argc,char *argv[])
 
 	for (int i = 1; i < argc; i++) {
 		char* arg = argv[i];
-		if (strncmp(arg, "freq1=", 6) == 0) freq1 = atof(arg + 6);
-		else if (strncmp(arg, "freq2=", 6) == 0) freq2 = atof(arg + 6);
-		else if (strncmp(arg, "freq=", 5) == 0) freq1 = freq2 = atof(arg + 5);
-		else if (strncmp(arg, "phase1=", 7) == 0) phase1 = atof(arg + 7);
-		else if (strncmp(arg, "phase2=", 7) == 0) phase2 = atof(arg + 7);
-		else if (strncmp(arg, "phase=", 6) == 0) phase1 = phase2 = atof(arg + 6);
-		else if (strncmp(arg, "amp1=", 5) == 0) amp1 = atof(arg + 5);
-		else if (strncmp(arg, "amp2=", 5) == 0) amp2 = atof(arg + 5);
-		else if (strncmp(arg, "amp=", 4) == 0) amp1 = amp2 = atof(arg + 4);
-		else {
-			// Fallback for purely positional arguments
-			if (i == 1 && atof(arg) != 0.0) freq1 = atof(arg);
-			if (i == 2 && atof(arg) != 0.0) freq2 = atof(arg);
+		if (extract_arg(arg, "freq1", &freq1, atof)) {
+			continue;
+		} else if (extract_arg(arg, "freq2", &freq2, atof)) {
+			continue;
+		} else if (extract_arg(arg, "phase1", &phase1, atof)) {
+			continue;
+		} else if (extract_arg(arg, "phase2", &phase2, atof)) {
+			continue;
+		} else if (extract_arg(arg, "amp1", &amp1, atof)) {
+			continue;
+		} else if (extract_arg(arg, "amp2", &amp2, atof)) {
+			continue;
+		} else if (extract_arg(arg, "freq", &freq1, atof)) {
+			freq2 = freq1;
+			continue;
+		} else if (extract_arg(arg, "phase", &phase1, atof)) {
+			phase2 = phase1;
+			continue;
+		} else if (extract_arg(arg, "amp", &amp1, atof)) {
+			amp2 = amp1;
+			continue;
+		} else {
+			printf("Unknown argument: %s\n", arg);
 		}
 	}
 
-	int oscillator = 75757500;			// Our DDS is clocked by a 75.7575MHz oscilator
-	double DDS_acc_range = 0x100000000;	// and is using a 32-bits DDS accumulator 
+	double oscillator = 151515000.0;		// Our DDS is clocked by a 151.515MHz PLL (75.7575MHz * 2)
+	double DDS_acc_range = 4294967296.0;	// and is using a 32-bits DDS accumulator 
 
 	unsigned int DDS1_acc_inc = (unsigned int)(freq1 / oscillator * DDS_acc_range);
 	unsigned int DDS2_acc_inc = (unsigned int)(freq2 / oscillator * DDS_acc_range);
