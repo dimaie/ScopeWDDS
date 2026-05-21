@@ -1,0 +1,171 @@
+// Sample code for FX2 USB-2 interface
+// (c) fpga4fun.com KNJN LLC - 2008
+
+// This example shows how to create a DDS (direct digital synthesizer) controlled from USB-2
+
+module FX2_DDS(
+	FX2_CLK, FX2_FD, FX2_SLRD, FX2_SLWR, FX2_flags, 
+	FX2_PA_2, FX2_PA_3, FX2_PA_4, FX2_PA_5, FX2_PA_6, FX2_PA_7,
+
+	DAC_clk_in, DAC_clk_out, DAC_data_out
+);
+
+input FX2_CLK;
+inout [7:0] FX2_FD;
+input [2:0] FX2_flags;
+output FX2_SLRD, FX2_SLWR;
+
+//output FX2_PA_0;
+//output FX2_PA_1;
+output FX2_PA_2;
+output FX2_PA_3;
+output FX2_PA_4;
+output FX2_PA_5;
+output FX2_PA_6;
+input FX2_PA_7;
+
+input DAC_clk_in;
+output DAC_clk_out;
+output [9:0] DAC_data_out;
+
+////////////////////////////////////////////////////////////////////////////////
+// Rename "FX2" ports into "FIFO" ports, to give them more meaningful names
+// FX2 USB signals are active low, take care of them now
+// Note: You probably don't need to change anything in this section
+
+// FX2 outputs
+wire FIFO_CLK = FX2_CLK;
+
+wire FIFO2_empty = ~FX2_flags[0];	wire FIFO2_data_available = ~FIFO2_empty;
+wire FIFO3_empty = ~FX2_flags[1];	wire FIFO3_data_available = ~FIFO3_empty;
+wire FIFO4_full = ~FX2_flags[2];	wire FIFO4_ready_to_accept_data = ~FIFO4_full;
+wire FIFO5_full = ~FX2_PA_7;		wire FIFO5_ready_to_accept_data = ~FIFO5_full;
+//assign FX2_PA_0 = 1'b1;
+//assign FX2_PA_1 = 1'b1;
+assign FX2_PA_3 = 1'b1;
+
+// FX2 inputs
+wire FIFO_RD, FIFO_WR, FIFO_PKTEND, FIFO_DATAIN_OE, FIFO_DATAOUT_OE;
+wire FX2_SLRD = ~FIFO_RD;
+wire FX2_SLWR = ~FIFO_WR;
+assign FX2_PA_2 = ~FIFO_DATAIN_OE;
+assign FX2_PA_6 = ~FIFO_PKTEND;
+
+wire [1:0] FIFO_FIFOADR;
+assign {FX2_PA_5, FX2_PA_4} = FIFO_FIFOADR;
+
+// FX2 bidirectional data bus
+wire [7:0] FIFO_DATAIN = FX2_FD;
+wire [7:0] FIFO_DATAOUT;
+assign FX2_FD = FIFO_DATAOUT_OE ? FIFO_DATAOUT : 8'hZZ;
+
+////////////////////////////////////////////////////////////////////////////////
+// So now everything is in positive logic
+//	FIFO_RD, FIFO_WR, FIFO_DATAIN, FIFO_DATAOUT, FIFO_DATAIN_OE, FIFO_DATAOUT_OE, FIFO_PKTEND, FIFO_FIFOADR
+//	FIFO2_empty, FIFO2_data_available
+//	FIFO3_empty, FIFO3_data_available
+//	FIFO4_full, FIFO4_ready_to_accept_data
+//	FIFO5_full, FIFO5_ready_to_accept_data
+
+////////////////////////////////////////////////////////////////////////////////
+assign FIFO_FIFOADR = 2'b00;		// select FIFO2
+assign FIFO_RD = 1'b1;			// always read
+assign FIFO_WR = 1'b0;			// never write
+assign FIFO_DATAOUT = 8'h00;	// never write, so this value is not used
+assign FIFO_DATAIN_OE = 1'b1;			// always read data
+assign FIFO_DATAOUT_OE = 1'b0;			// never output data
+assign FIFO_PKTEND = 1'b0;
+
+reg [3:0] timeout;
+always @(posedge FIFO_CLK) if(FIFO2_data_available) timeout<=4'hF; else if(|timeout) timeout<=timeout-4'h1;
+wire timeout_complete = (timeout==4'h1) && !FIFO2_data_available;
+
+// create 32-bits value from FIFO
+reg [31:0] FIFO_value;
+always @(posedge FIFO_CLK) if(FIFO2_data_available) FIFO_value[31:24] <= FIFO_DATAIN;
+always @(posedge FIFO_CLK) if(FIFO2_data_available) FIFO_value[23:16] <= FIFO_value[31:24];
+always @(posedge FIFO_CLK) if(FIFO2_data_available) FIFO_value[15: 8] <= FIFO_value[23:16];
+always @(posedge FIFO_CLK) if(FIFO2_data_available) FIFO_value[ 7: 0] <= FIFO_value[15: 8];
+
+// cross clock domain to DDS
+wire new_acc_inc;
+Flag_CrossDomain fcdnai(.clkA(FIFO_CLK), .FlagIn_clkA(timeout_complete), .clkB(DAC_clk_in), .FlagOut_clkB(new_acc_inc));
+
+reg [31:0] DDS_acc_inc;
+always @(posedge DAC_clk_in) if(new_acc_inc) DDS_acc_inc <= FIFO_value;
+
+// DDS
+assign DAC_clk_out = ~DAC_clk_in;
+DDS_sine_lookup_linearinterpolated sine1(.clk(DAC_clk_in), .acc_inc(DDS_acc_inc), .value(DAC_data_out));
+
+endmodule
+
+/////////////////////////////////////////////////////
+module Flag_CrossDomain(
+    clkA, FlagIn_clkA, 
+    clkB, FlagOut_clkB);
+
+// clkA domain signals
+input clkA, FlagIn_clkA;
+
+// clkB domain signals
+input clkB;
+output FlagOut_clkB;
+
+reg FlagToggle_clkA;
+reg [2:0] SyncA_clkB;
+
+always @(posedge clkA) if(FlagIn_clkA) FlagToggle_clkA <= ~FlagToggle_clkA;  // this changes level when a flag is seen
+always @(posedge clkB) SyncA_clkB <= {SyncA_clkB[1:0], FlagToggle_clkA};   // which can then be synched to clkB
+
+assign FlagOut_clkB = (SyncA_clkB[2] ^ SyncA_clkB[1]);  // recreate the flag from the level change
+endmodule
+
+/////////////////////////////////////////////////////
+module DDS_sine_lookup_linearinterpolated(clk, acc_inc, value);
+parameter acc_width = 32;
+parameter lookup_addr_width = 11;
+parameter lookup_value_width = 17;
+parameter linearinterpolation_width = 8;
+parameter DAC_width = 10;
+
+input clk;
+input [acc_width-1:0] acc_inc;
+output [DAC_width-1:0] value;
+
+reg [acc_width-1:0] acc;
+always @(posedge clk) acc <= acc + acc_inc;
+wire [lookup_value_width-1:0] sine1_lv;  sine_lookup sine1(.clk(clk), .addr(acc[acc_width-1:acc_width-lookup_addr_width]  ), .value(sine1_lv));
+wire [lookup_value_width-1:0] sine2_lv;  sine_lookup sine2(.clk(clk), .addr(acc[acc_width-1:acc_width-lookup_addr_width]+1), .value(sine2_lv));
+
+reg [linearinterpolation_width-1:0] acc_delayA;  always @(posedge clk) acc_delayA <= acc[acc_width-lookup_addr_width-1:acc_width-lookup_addr_width-linearinterpolation_width];
+reg [linearinterpolation_width-1:0] acc_delayB;  always @(posedge clk) acc_delayB <= acc_delayA;
+reg [linearinterpolation_width-1:0] acc_delayC;  always @(posedge clk) acc_delayC <= acc_delayB;
+
+wire [linearinterpolation_width  :0] sine1_mf = (1 << linearinterpolation_width) - acc_delayC;
+wire [linearinterpolation_width-1:0] sine2_mf = acc_delayC;
+reg [lookup_value_width+linearinterpolation_width-1:0] sine_p; always @(posedge clk) sine_p <= sine1_lv*sine1_mf + sine2_lv*sine2_mf;
+assign value = sine_p[lookup_value_width+linearinterpolation_width-1:lookup_value_width+linearinterpolation_width-DAC_width];
+endmodule
+
+/////////////////////////////////////////////////////
+// sine lookup value module
+// 3 clock latency
+module sine_lookup(clk, addr, value);
+input clk;
+input [10:0] addr;
+output [16:0] value;
+
+wire [15:0] ROM_sine_q;
+lpm_ram_dp ROM_sine(
+	.wrclock(clk), .data(16'h0), .wraddress(9'h0), .wren(1'b0),
+	.rdclock(clk), .q(ROM_sine_q), .rdaddress(addr[9] ? ~addr[8:0] : addr[8:0])
+);
+defparam ROM_sine.lpm_width = 16;
+defparam ROM_sine.lpm_widthad = 9;
+defparam ROM_sine.lpm_file = "sine.mif";
+defparam ROM_sine.lpm_outdata = "REGISTERED";
+
+reg [1:0] addr_MSBdelay; always @(posedge clk) addr_MSBdelay <= {addr_MSBdelay[0],addr[10]};
+reg [16:0] value; always @(posedge clk) value <= addr_MSBdelay[1] ? {1'b0,-ROM_sine_q} : {1'b1,ROM_sine_q};
+endmodule
